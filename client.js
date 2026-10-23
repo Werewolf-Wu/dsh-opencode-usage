@@ -34,8 +34,18 @@ window.__ModuleLoader__.load({
       resetReached: '重置时间已到，请重新打开获取最新用量',
       windowExceeded: '此窗口已达上限',
       emptyWindow: '暂无窗口数据',
-      billingEnds: '当前账期结束',
       billingUnavailable: '暂时无法获取账期',
+      account: '账号',
+      billingPeriod: '订阅周期（API）',
+      periodUsage: '本期用量',
+      monthlyEstimated: '每月用量（估算）',
+      usedApprox: '约 {percent}% 已用',
+      estimatedUsage: '按套餐额度与余额推算',
+      periodEndsOn: '{date} 结束',
+      estimateExhausted: '套餐内估算额度已用尽',
+      plan: '套餐',
+      tokens: '{value} tokens',
+      requests: '{count} 次请求',
       loading: '正在获取用量…',
       empty: '暂无用量数据',
       retry: '重试',
@@ -70,8 +80,18 @@ window.__ModuleLoader__.load({
       resetReached: 'Reset time reached. Reopen to get the latest usage.',
       windowExceeded: 'This window has reached its limit.',
       emptyWindow: 'No window data',
-      billingEnds: 'Current billing period ends',
       billingUnavailable: 'Billing period is temporarily unavailable.',
+      account: 'Account',
+      billingPeriod: 'Subscription period (API)',
+      periodUsage: 'This period',
+      monthlyEstimated: 'Monthly usage (estimated)',
+      usedApprox: 'about {percent}% used',
+      estimatedUsage: 'Estimated from the plan pool and remaining balance',
+      periodEndsOn: 'Ends {date}',
+      estimateExhausted: 'Estimated plan pool is used up',
+      plan: 'Plan',
+      tokens: '{value} tokens',
+      requests: '{count} requests',
       loading: 'Loading usage…',
       empty: 'No usage data',
       retry: 'Retry',
@@ -133,6 +153,7 @@ window.__ModuleLoader__.load({
       .ou_value {
         color: var(--dsw-alias-label-primary); font-variant-numeric: tabular-nums; font-weight: 500;
       }
+      .ou_account { min-width: 0; overflow-wrap: anywhere; }
       .ou_hint { margin-top: 4px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
       .ou_retry {
         padding: 1px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm);
@@ -186,20 +207,22 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** Command Code credits and windows have their own Host contract. */
+    function validCommandWindow(value) {
+      if (value === null) return true
+      if (typeof value !== 'object' || Array.isArray(value)) return false
+      return (
+        typeof value.used === 'number' && Number.isFinite(value.used) && value.used >= 0 &&
+        typeof value.cap === 'number' && Number.isFinite(value.cap) && value.cap > 0 &&
+        typeof value.exceeded === 'boolean' &&
+        (value.resetsAt === null || typeof value.resetsAt === 'string') &&
+        (value.estimated === undefined || typeof value.estimated === 'boolean')
+      )
+    }
+
     function validCommandUsage(usage) {
       if (usage === null || typeof usage !== 'object' || Array.isArray(usage)) return false
-      if (!COMMAND_WINDOWS.every((name) => {
-        const value = usage[name]
-        if (value === null) return true
-        if (typeof value !== 'object' || Array.isArray(value)) return false
-        return (
-          typeof value.used === 'number' && Number.isFinite(value.used) && value.used >= 0 &&
-          typeof value.cap === 'number' && Number.isFinite(value.cap) && value.cap > 0 &&
-          typeof value.exceeded === 'boolean' &&
-          (value.resetsAt === null || typeof value.resetsAt === 'string')
-        )
-      })) return false
+      if (!COMMAND_WINDOWS.every((name) => validCommandWindow(usage[name]))) return false
+      if (usage.monthly !== undefined && !validCommandWindow(usage.monthly)) return false
 
       const credits = usage.credits
       if (credits === null || typeof credits !== 'object' || Array.isArray(credits)) return false
@@ -208,9 +231,31 @@ window.__ModuleLoader__.load({
       ))) return false
 
       const billing = usage.billing
-      return billing !== null && typeof billing === 'object' && !Array.isArray(billing) &&
-        ['available', 'none', 'unavailable'].includes(billing.status) &&
-        (billing.periodEndsAt === null || typeof billing.periodEndsAt === 'string')
+      if (billing === null || typeof billing !== 'object' || Array.isArray(billing)) return false
+      if (!['available', 'none', 'unavailable'].includes(billing.status)) return false
+      const periodValue = (value) => value === undefined || value === null || typeof value === 'string'
+      if (!periodValue(billing.periodStartsAt) || !periodValue(billing.periodEndsAt)) return false
+
+      const plan = usage.plan
+      if (!(plan === undefined || plan === null || (
+        typeof plan === 'object' && !Array.isArray(plan) &&
+        typeof plan.name === 'string' &&
+        (plan.credits === null || plan.credits === undefined || (
+          typeof plan.credits === 'number' && Number.isFinite(plan.credits) && plan.credits > 0
+        ))
+      ))) return false
+
+      const account = usage.account
+      if (!(account === undefined || account === null || (
+        typeof account === 'object' && !Array.isArray(account) &&
+        typeof account.userName === 'string' && account.userName.length > 0
+      ))) return false
+
+      const totals = usage.totals
+      if (totals === undefined || totals === null) return true
+      const amountValue = (value) => value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+      return typeof totals === 'object' && !Array.isArray(totals) &&
+        amountValue(totals.tokens) && amountValue(totals.requests)
     }
 
     function errorText(state, service, t) {
@@ -261,6 +306,25 @@ window.__ModuleLoader__.load({
       return value === null ? '—' : value.toLocaleString(undefined, { maximumFractionDigits: 2 })
     }
 
+    /** Compact token counts, matching the Studio tiles (e.g. 931.8M). */
+    function formatTokens(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null
+      if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`
+      if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`
+      if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`
+      return String(Math.round(value))
+    }
+
+    function formatCount(value) {
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value.toLocaleString() : null
+    }
+
+    function formatDate(value) {
+      if (typeof value !== 'string') return null
+      const date = new Date(value)
+      return Number.isFinite(date.getTime()) ? date.toLocaleDateString() : null
+    }
+
     function CommandUsageRow({ name, entry, t }) {
       if (entry === null) {
         return h(
@@ -271,59 +335,115 @@ window.__ModuleLoader__.load({
         )
       }
 
+      const estimated = entry.estimated === true
+      const label = estimated ? t('monthlyEstimated') : t(name)
       const percent = Math.round(entry.used / entry.cap * 100)
       const bounded = Math.max(0, Math.min(100, percent))
-      const resetAt = typeof entry.resetsAt === 'string' ? Date.parse(entry.resetsAt) : NaN
-      const resetText = !Number.isFinite(resetAt)
-        ? null
-        : resetAt <= Date.now()
-          ? t('resetReached')
-          : t('resets', { time: resetDistance(entry.resetsAt, t) })
+      let resetText = null
+      if (estimated) {
+        const endsAt = formatDate(entry.resetsAt)
+        resetText = endsAt === null ? null : t('periodEndsOn', { date: endsAt })
+      } else {
+        const resetAt = typeof entry.resetsAt === 'string' ? Date.parse(entry.resetsAt) : NaN
+        resetText = !Number.isFinite(resetAt)
+          ? null
+          : resetAt <= Date.now()
+            ? t('resetReached')
+            : t('resets', { time: resetDistance(entry.resetsAt, t) })
+      }
       return h(
         'div',
         { className: 'ou_row' },
         h(
           'div',
           { className: 'ou_line' },
-          h('span', null, t(name)),
-          h('span', { className: 'ou_value' }, t('used', { percent: String(percent) })),
+          h('span', null, label),
+          h('span', { className: 'ou_value' }, t(estimated ? 'usedApprox' : 'used', { percent: String(percent) })),
         ),
         h(
           'div',
-          { className: 'ou_track', role: 'progressbar', 'aria-label': t(name), 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': bounded },
+          { className: 'ou_track', role: 'progressbar', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': bounded },
           h('div', { className: 'ou_fill', style: { width: `${bounded}%` } }),
         ),
         h('div', { className: 'ou_hint' }, t('creditsUsed', { used: formatCredits(entry.used), cap: formatCredits(entry.cap) })),
-        entry.exceeded ? h('div', { className: 'ou_hint' }, t('windowExceeded')) : null,
+        estimated ? h('div', { className: 'ou_hint' }, t('estimatedUsage')) : null,
+        entry.exceeded
+          ? h('div', { className: 'ou_hint' }, t(estimated ? 'estimateExhausted' : 'windowExceeded'))
+          : null,
         resetText === null ? null : h('div', { className: 'ou_hint' }, resetText),
       )
     }
 
+    function CommandIdentityRows({ usage, t }) {
+      const { billing, plan, account, totals } = usage
+      const rows = []
+
+      if (account !== null && account !== undefined) {
+        rows.push(h(
+          'div',
+          { key: 'account', className: 'ou_row ou_line' },
+          h('span', null, t('account')),
+          h('span', { className: 'ou_value ou_account' }, plan === null || plan === undefined ? `@${account.userName}` : `@${account.userName} · ${plan.name}`),
+        ))
+      }
+
+      if ((account === null || account === undefined) && plan !== null && plan !== undefined) {
+        rows.push(h(
+          'div',
+          { key: 'plan', className: 'ou_row ou_line' },
+          h('span', null, t('plan')),
+          h('span', { className: 'ou_value' }, plan.name),
+        ))
+      }
+
+      const start = formatDate(billing.periodStartsAt)
+      const end = formatDate(billing.periodEndsAt)
+      if (end !== null) {
+        rows.push(h(
+          'div',
+          { key: 'period', className: 'ou_row' },
+          h('div', null, t('billingPeriod')),
+          h('div', { className: 'ou_hint' }, start === null ? end : `${start} – ${end}`),
+        ))
+      }
+
+      if (totals !== null && totals !== undefined) {
+        const parts = []
+        const tokens = formatTokens(totals.tokens)
+        if (tokens !== null) parts.push(t('tokens', { value: tokens }))
+        const requests = formatCount(totals.requests)
+        if (requests !== null) parts.push(t('requests', { count: requests }))
+        if (parts.length > 0) {
+          rows.push(h(
+            'div',
+            { key: 'totals', className: 'ou_row' },
+            h('div', null, t('periodUsage')),
+            h('div', { className: 'ou_hint' }, parts.join(' · ')),
+          ))
+        }
+      }
+
+      return rows.length === 0 ? null : h(React.Fragment, null, rows)
+    }
+
     function CommandBody({ usage, t, reload }) {
-      const billingAt = usage.billing.status === 'available' && typeof usage.billing.periodEndsAt === 'string'
-        ? Date.parse(usage.billing.periodEndsAt)
-        : NaN
       const billingUnavailable = usage.billing.status === 'unavailable' || (
-        usage.billing.status === 'available' && !Number.isFinite(billingAt)
+        usage.billing.status === 'available' && formatDate(usage.billing.periodEndsAt) === null
       )
       return h(
         React.Fragment,
         null,
         COMMAND_WINDOWS.map((name) => h(CommandUsageRow, { key: name, name, entry: usage[name], t })),
+        usage.monthly === null || usage.monthly === undefined
+          ? null
+          : h(CommandUsageRow, { key: 'monthly', name: 'monthly', entry: usage.monthly, t }),
         CREDIT_KEYS.map((name) => h(
           'div',
           { key: name, className: 'ou_row ou_line' },
           h('span', null, t(`${name}Credits`)),
           h('span', { className: 'ou_value' }, usage.credits[name] === null ? '—' : t('creditBalance', { value: formatCredits(usage.credits[name]) })),
         )),
-        Number.isFinite(billingAt)
-          ? h(
-              'div',
-              { className: 'ou_row' },
-              h('div', null, t('billingEnds')),
-              h('div', { className: 'ou_hint' }, new Date(billingAt).toLocaleString()),
-            )
-          : null,
+        h(CommandIdentityRows, { usage, t }),
         billingUnavailable
           ? h(
               'div',

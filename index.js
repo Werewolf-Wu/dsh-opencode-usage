@@ -12,7 +12,38 @@ const ROUTE = '/opencode-go/usage'
 const WINDOWS = ['rolling', 'weekly', 'monthly']
 const CREDENTIAL = 'OPENCODE_GO_API_KEY'
 const TIMEOUT_MS = 15000
-const COMMAND_CODE_URL = 'https://api.commandcode.ai/alpha/billing'
+const OPTIONAL_TIMEOUT_MS = 8000
+const COMMAND_CODE_API = 'https://api.commandcode.ai'
+const COMMAND_CODE_ROUTE = '/command-code/usage'
+const COMMAND_CODE_CREDENTIAL = 'COMMANDCODE_API_KEY'
+
+/**
+ * Monthly credit pools from the official CLI (command-code 1.88, getPlanInfo).
+ * The API returns the remaining balance but never the pool, and an unknown id
+ * must fall back to "no monthly row" rather than another plan's limit.
+ * Provider is pay-as-you-go, so it has no pool to subtract from.
+ */
+const COMMAND_PLAN_CREDITS = {
+  'individual-go': 10,
+  'individual-go-v1': 10,
+  'individual-goat': 70,
+  'individual-pro': 30,
+  'individual-pro-v1': 80,
+  'individual-max': 150,
+  'individual-ultra': 300,
+  'teams-pro': 40,
+}
+const COMMAND_PLAN_NAMES = {
+  'individual-go': 'Go',
+  'individual-go-v1': 'Go',
+  'individual-goat': 'GOAT',
+  'individual-pro': 'Pro',
+  'individual-pro-v1': 'Pro',
+  'individual-provider': 'Provider',
+  'individual-max': 'Max',
+  'individual-ultra': 'Ultra',
+  'teams-pro': 'Teams Pro',
+}
 
 export const inject = ['webServer', 'credentials', 'connection']
 
@@ -85,12 +116,54 @@ function normalizeCommandWindow(value) {
   }
 }
 
-async function fetchCommandData(endpoint, key) {
+function nonNegativeNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+/** Display-only; ids and email stay on the Host. */
+function normalizeCommandAccount(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || value.success !== true) return null
+  const user = value.user
+  if (user === null || typeof user !== 'object' || Array.isArray(user)) return null
+  const userName = typeof user.userName === 'string' ? user.userName.trim() : ''
+  if (userName.length === 0 || userName.length > 64 || /[\s\u0000-\u001f\u007f]/.test(userName)) return null
+  return { userName }
+}
+
+function normalizeCommandPlan(planId) {
+  if (typeof planId !== 'string') return null
+  const id = planId.trim().toLowerCase().replaceAll('_', '-')
+  if (!Object.hasOwn(COMMAND_PLAN_NAMES, id)) return null
+  const credits = Object.hasOwn(COMMAND_PLAN_CREDITS, id) ? COMMAND_PLAN_CREDITS[id] : null
+  return { id, name: COMMAND_PLAN_NAMES[id], credits }
+}
+
+function normalizeCommandTotals(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const tokensIn = nonNegativeNumber(value.totalTokensIn)
+  const tokensOut = nonNegativeNumber(value.totalTokensOut)
+  const tokens = nonNegativeNumber(value.totalTokens) ?? (tokensIn !== null && tokensOut !== null ? tokensIn + tokensOut : null)
+  const requests = nonNegativeNumber(value.totalCount)
+  if (tokens === null && requests === null) return null
+  return { tokens, requests }
+}
+
+/** Studio meters the monthly pool as pool minus balance; the API has no monthly window. */
+function commandMonthlyWindow(plan, credits, periodEndsAt) {
+  if (plan === null || plan.credits === null || credits.monthly === null) return null
+  // A balance above the table's pool means the table does not fit this account.
+  if (credits.monthly > plan.credits) return null
+  const cap = plan.credits
+  const used = Math.max(0, Math.min(cap, cap - credits.monthly))
+  return { used, cap, exceeded: used >= cap, resetsAt: periodEndsAt, estimated: true }
+}
+
+async function fetchCommandData(endpoint, key, timeoutMs = TIMEOUT_MS) {
   let response
   try {
-    response = await fetch(`${COMMAND_CODE_URL}/${endpoint}`, {
+    response = await fetch(`${COMMAND_CODE_API}${endpoint}`, {
       headers: { authorization: `Bearer ${key}`, accept: 'application/json' },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       redirect: 'error',
     })
   } catch {
@@ -105,12 +178,15 @@ async function fetchCommandData(endpoint, key) {
 }
 
 async function commandUsageOutcome(ctx) {
-  const credential = await ctx.credentials.resolve('COMMANDCODE_API_KEY')
+  const credential = await ctx.credentials.resolve(COMMAND_CODE_CREDENTIAL)
   if (credential === undefined) return { status: 401, body: { code: 'missing-key' } }
 
+  // whoami and summary are optional, so they get a shorter budget and must not
+  // hold up the round that decides whether the panel can render at all.
+  const whoamiRequest = fetchCommandData('/alpha/whoami', credential.value, OPTIONAL_TIMEOUT_MS)
   const [credits, subscription] = await Promise.all([
-    fetchCommandData('credits', credential.value),
-    fetchCommandData('subscriptions', credential.value),
+    fetchCommandData('/alpha/billing/credits', credential.value),
+    fetchCommandData('/alpha/billing/subscriptions', credential.value),
   ])
   if (credits.error) return { status: 502, body: credits.error }
   const balance = credits.data?.credits
@@ -126,27 +202,48 @@ async function commandUsageOutcome(ctx) {
     return { status: 502, body: { code: 'invalid-response' } }
   }
 
-  const billing = { status: 'unavailable', periodEndsAt: null }
+  // The credits payload stamps the plan on some responses; the subscription is authoritative.
+  let planId = typeof credits.data.planId === 'string' ? credits.data.planId : null
+  const billing = { status: 'unavailable', periodStartsAt: null, periodEndsAt: null }
   if (subscription.data?.success === true) {
     if (subscription.data.data === null) {
+      // Explicit "no subscription": a credits plan id is not a current plan.
       billing.status = 'none'
+      planId = null
     } else {
-      const end = subscription.data.data?.currentPeriodEnd
-      const date = typeof end === 'string' ? normalizeDate(end) : null
-      if (date !== null) {
+      const data = subscription.data.data
+      const start = normalizeDate(data?.currentPeriodStart)
+      const end = normalizeDate(data?.currentPeriodEnd)
+      if (typeof data?.planId === 'string') planId = data.planId
+      if (end !== null) {
         billing.status = 'available'
-        billing.periodEndsAt = date
+        billing.periodStartsAt = start
+        billing.periodEndsAt = end
       }
     }
   }
+
+  // Only a period-scoped summary is meaningful: the client labels these numbers
+  // "this period", so an unscoped (lifetime) fallback would be misleading.
+  const summaryRequest = billing.periodStartsAt === null
+    ? null
+    : fetchCommandData(`/alpha/usage/summary?since=${encodeURIComponent(billing.periodStartsAt)}`, credential.value, OPTIONAL_TIMEOUT_MS)
+  const [whoami, summary] = await Promise.all([whoamiRequest, summaryRequest])
+  const totals = summary === null || summary.error ? null : normalizeCommandTotals(summary.data)
+
+  const plan = normalizeCommandPlan(planId)
   return {
     status: 200,
     body: {
       usage: {
         fiveHour: normalizeCommandWindow(credits.data.windowLimits?.fiveHour),
         weekly: normalizeCommandWindow(credits.data.windowLimits?.weekly),
+        monthly: commandMonthlyWindow(plan, normalized, billing.periodEndsAt),
         credits: normalized,
         billing,
+        plan,
+        account: whoami.error ? null : normalizeCommandAccount(whoami.data),
+        totals,
       },
     },
   }
@@ -201,5 +298,5 @@ function registerUsageRoute(ctx, path, query) {
 
 export function apply(ctx) {
   registerUsageRoute(ctx, ROUTE, usageOutcome)
-  registerUsageRoute(ctx, '/command-code/usage', commandUsageOutcome)
+  registerUsageRoute(ctx, COMMAND_CODE_ROUTE, commandUsageOutcome)
 }

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "OpenCode Go / Command Code usage",
-    "description": "Adds a small icon beside the composer's context meter; open it to switch between OpenCode Go usage and Command Code windows and credit balances."
+    "description": "Adds a small icon beside the composer's context meter; open it to switch between OpenCode Go usage and Command Code windows, monthly usage, account, subscription period, and period tokens/requests."
   }
 }
