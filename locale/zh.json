@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "OpenCode Go / Command Code 用量",
-    "description": "在输入框下方、上下文用量右侧显示一个小图标；打开后可切换查看 OpenCode Go 用量或 Command Code 的窗口用量与余额。"
+    "description": "在输入框下方、上下文用量右侧显示一个小图标；打开后可切换查看 OpenCode Go 用量，或 Command Code 的窗口用量、每月用量、账号与订阅周期、本期 TOKEN/请求数。"
   }
 }
