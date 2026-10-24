@@ -26,7 +26,9 @@ jobs:
         run: |
           node -e "const p = require('./package.json'); if ('v' + p.version !== process.env.GITHUB_REF_NAME) { console.error('tag ' + process.env.GITHUB_REF_NAME + ' does not match package version v' + p.version); process.exit(1) }"
       - name: Build tarball
-        run: npm pack --pack-destination dist
+        run: |
+          mkdir -p dist
+          npm pack --pack-destination dist
       - name: Check tarball
         run: |
           tar -tzf dist/*.tgz
