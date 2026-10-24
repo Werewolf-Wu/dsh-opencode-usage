@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check sources
+        run: |
+          node --check index.js
+          node --check client.js
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          node -e "const p = require('./package.json'); if ('v' + p.version !== process.env.GITHUB_REF_NAME) { console.error('tag ' + process.env.GITHUB_REF_NAME + ' does not match package version v' + p.version); process.exit(1) }"
+      - name: Build tarball
+        run: npm pack --pack-destination dist
+      - name: Check tarball
+        run: |
+          tar -tzf dist/*.tgz
+          tar -xzOf dist/*.tgz package/package.json | node -e "let s = ''; process.stdin.on('data', (d) => s += d).on('end', () => { const m = JSON.parse(s); if (m.dsh?.bundle?.patch === undefined) { console.error('tarball has no dsh.bundle.patch'); process.exit(1) } })"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-tarball
+          path: dist/*.tgz
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tgz --generate-notes --title "$GITHUB_REF_NAME"

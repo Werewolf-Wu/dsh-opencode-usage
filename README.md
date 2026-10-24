@@ -58,6 +58,16 @@ dsh plugin --profile <name> add "link:/path/to/dsh-opencode-usage"
 
 profile 重算后 DSH 会热加载 Host 与 Client 两半。
 
+## 从 Release 安装
+
+仓库打 `v<version>` 标签后，`.github/workflows/release.yml` 会检查语法、执行 `npm pack`，把 tarball 挂到 GitHub Release。DSH 支持用 tarball 地址安装，所以不需要发布到 npm：
+
+```sh
+dsh plugin --profile web add https://github.com/Werewolf-Wu/dsh-opencode-usage/releases/download/v1.1.0/local-dsh-opencode-usage-1.1.0.tgz
+```
+
+也可以在 Plugins 页面的“安装第三方插件”里填同一个地址。标签必须与 `package.json` 的 `version` 一致，否则 workflow 失败。升级时用新版本的地址再执行一次 `add`；回滚就安装旧版本地址。不打标签时，可在 Actions 里手动运行该 workflow，从运行记录下载 `plugin-tarball` 构件。
+
 支持部署在 `/dsh/` 等子路径下，用量请求会沿用该路径前缀。使用反向代理时，需按 DSH 的部署要求配置前缀剥除。
 
 ## 验证
